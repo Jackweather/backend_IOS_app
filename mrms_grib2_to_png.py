@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import cartopy.crs as ccrs
 from matplotlib.colors import ListedColormap, BoundaryNorm
 from scipy.ndimage import gaussian_filter
+import gc  # Import garbage collector
 
 def download_file(url, output_path):
     """Download a file from a URL to a specified output path."""
@@ -94,7 +95,14 @@ if __name__ == "__main__":
     # Process the GRIB2 file and save as a PNG
     process_grib_to_png(grib_file, png_file)
 
-    # Clean up downloaded and extracted files
+    # Free memory after downloading the file
+    gc.collect()
+
+    # Free memory after processing the GRIB2 data
+    plt.close()
+    gc.collect()
+
+    # Free memory after cleaning up temporary files
     os.remove(grib_gz_file)
     os.remove(grib_file)
-    print("Temporary files cleaned up.")
+    gc.collect()
