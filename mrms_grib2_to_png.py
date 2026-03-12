@@ -7,6 +7,7 @@ import cartopy.crs as ccrs
 from matplotlib.colors import ListedColormap, BoundaryNorm
 from scipy.ndimage import gaussian_filter
 import gc  # Import garbage collector
+import psutil  # For monitoring memory usage
 
 def download_file(url, output_path):
     """Download a file from a URL to a specified output path."""
@@ -53,13 +54,14 @@ def process_grib_to_png(grib_file, png_file):
     ax.set_extent([lons.min(), lons.max(), lats.min(), lats.max()], crs=ccrs.PlateCarree())
 
     # Process data in smaller chunks if possible
-    chunk_size = 1000  # Example chunk size for large datasets
+    chunk_size = 500  # Further reduce chunk size for large datasets
     for i in range(0, data.shape[0], chunk_size):
         chunk = data[i:i + chunk_size]
         # Process the chunk (e.g., apply Gaussian filter)
         chunk = gaussian_filter(chunk, sigma=1)
         del chunk  # Free memory after processing each chunk
         gc.collect()
+        log_memory_usage(f"after processing chunk {i // chunk_size + 1}")
 
     # Plot the data without map features or colorbar
     mesh = ax.pcolormesh(lons, lats, data, cmap=cmap, norm=norm, transform=ccrs.PlateCarree(), antialiased=True)  # Ensure anti-aliasing
@@ -87,6 +89,12 @@ def process_grib_to_png(grib_file, png_file):
     # Explicitly delete large variables after use
     del data, lats, lons, grb, grbs
     gc.collect()  # Force garbage collection
+
+def log_memory_usage(stage):
+    """Log memory usage at a specific stage."""
+    process = psutil.Process(os.getpid())
+    mem = process.memory_info().rss / (1024 * 1024)  # Convert bytes to MB
+    print(f"Memory usage at {stage}: {mem:.2f} MB")
 
 if __name__ == "__main__":
     # URL of the GRIB2 file
