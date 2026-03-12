@@ -48,9 +48,18 @@ def process_grib_to_png(grib_file, png_file):
     norm = BoundaryNorm(levels, ncolors=cmap.N, clip=True)
 
     # Create the Web Mercator projection for Mapbox compatibility
-    plt.figure(figsize=(10, 8), dpi=150)  # Reduced figure size and DPI for lower memory usage
+    plt.figure(figsize=(8, 6), dpi=100)  # Reduced figure size and DPI for lower memory usage
     ax = plt.axes(projection=ccrs.Mercator())
     ax.set_extent([lons.min(), lons.max(), lats.min(), lats.max()], crs=ccrs.PlateCarree())
+
+    # Process data in smaller chunks if possible
+    chunk_size = 1000  # Example chunk size for large datasets
+    for i in range(0, data.shape[0], chunk_size):
+        chunk = data[i:i + chunk_size]
+        # Process the chunk (e.g., apply Gaussian filter)
+        chunk = gaussian_filter(chunk, sigma=1)
+        del chunk  # Free memory after processing each chunk
+        gc.collect()
 
     # Plot the data without map features or colorbar
     mesh = ax.pcolormesh(lons, lats, data, cmap=cmap, norm=norm, transform=ccrs.PlateCarree(), antialiased=True)  # Ensure anti-aliasing
