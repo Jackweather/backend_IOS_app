@@ -9,3 +9,4 @@ cartopy
 Pillow
 apscheduler
 gunicorn
+scipy
