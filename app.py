@@ -1,7 +1,7 @@
 from flask import Flask, send_from_directory, render_template
 import os
-from apscheduler.schedulers.background import BackgroundScheduler
 import subprocess
+import threading
 
 app = Flask(__name__)
 
@@ -9,10 +9,12 @@ app = Flask(__name__)
 def run_grib_to_png():
     subprocess.run(['python', 'mrms_grib2_to_png.py'], check=True)
 
-# Initialize the scheduler
-scheduler = BackgroundScheduler()
-scheduler.add_job(run_grib_to_png, 'interval', minutes=5)
-scheduler.start()
+# Function to run scripts
+def run_scripts(scripts, delay):
+    import time
+    for script, cwd in scripts:
+        subprocess.run(['python', script], cwd=cwd, check=True)
+        time.sleep(delay)
 
 # Route to serve the index.html
 @app.route('/')
@@ -24,9 +26,14 @@ def serve_index():
 def serve_radar_image():
     return send_from_directory(os.getcwd(), 'MRMS_MergedBaseReflectivity.png', as_attachment=False)
 
-# Ensure the scheduler shuts down properly when the app exits
-import atexit
-atexit.register(lambda: scheduler.shutdown())
+@app.route("/run-task1")
+def run_task1():
+    scripts = [
+        ("/opt/render/project/src/mrms_grib2_to_png.py", "/opt/render/project/src"),
+       
+    ]
+    threading.Thread(target=lambda: run_scripts(scripts, 1)).start()
+    return "Task started in background! Check logs folder for output.", 200
 
 if __name__ == '__main__':
     app.run(debug=True)
