@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Map with Radar Overlay</title>
+    <link href='https://api.mapbox.com/mapbox-gl-js/v2.14.1/mapbox-gl.css' rel='stylesheet' />
+    <script src='https://api.mapbox.com/mapbox-gl-js/v2.14.1/mapbox-gl.js'></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: white; /* Set white background */
+            position: relative;
+            height: 100vh;
+        }
+        img {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            width: 300px; /* Set fixed width for the box */
+            height: auto; /* Maintain aspect ratio */
+            border: 1px solid black; /* Optional: Add a border for visibility */
+        }
+    </style>
+</head>
+<body>
+    <img src="/MRMS_MergedBaseReflectivity.png" alt="Radar Reflectivity" />
+</body>
+</html>

@@ -1,0 +1,10 @@
+Flask
+requests
+xarray
+cfgrib
+pygrib
+numpy
+matplotlib
+cartopy
+Pillow
+apscheduler
