@@ -10,3 +10,4 @@ Pillow
 apscheduler
 gunicorn
 scipy
+psutil
