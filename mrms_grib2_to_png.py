@@ -79,6 +79,74 @@ def normalize_longitude(value):
     return ((float(value) + 180.0) % 360.0) - 180.0
 
 
+def get_corner_bounds(message):
+    """Build corner bounds from GRIB metadata without allocating full lat/lon grids."""
+    first_lat = safe_grib_value(message, "latitudeOfFirstGridPointInDegrees")
+    first_lon = normalize_longitude(safe_grib_value(message, "longitudeOfFirstGridPointInDegrees"))
+    last_lat = safe_grib_value(message, "latitudeOfLastGridPointInDegrees")
+    last_lon = normalize_longitude(safe_grib_value(message, "longitudeOfLastGridPointInDegrees"))
+
+    if None in (first_lat, first_lon, last_lat, last_lon):
+        return None
+
+    north = max(first_lat, last_lat)
+    south = min(first_lat, last_lat)
+    west = min(first_lon, last_lon)
+    east = max(first_lon, last_lon)
+
+    return {
+        "top_left": (north, west),
+        "top_right": (north, east),
+        "bottom_left": (south, west),
+        "bottom_right": (south, east),
+    }
+
+
+def get_latitude_range(message):
+    """Return the first and last latitude values from GRIB metadata."""
+    first_lat = safe_grib_value(message, "latitudeOfFirstGridPointInDegrees")
+    last_lat = safe_grib_value(message, "latitudeOfLastGridPointInDegrees")
+    if None in (first_lat, last_lat):
+        return None
+    return float(first_lat), float(last_lat)
+
+
+def mercator_y(latitudes):
+    """Convert latitude degrees to normalized Web Mercator Y coordinates."""
+    clipped = np.clip(latitudes, -85.05112878, 85.05112878)
+    radians = np.deg2rad(clipped)
+    return np.log(np.tan((np.pi / 4.0) + (radians / 2.0)))
+
+
+def reproject_rgba_to_mercator(rgba, latitude_range):
+    """Reproject a regular lat/lon image into a Mercator-style image by remapping rows."""
+    if latitude_range is None:
+        return rgba
+
+    first_lat, last_lat = latitude_range
+    row_count = rgba.shape[0]
+    if row_count <= 1:
+        return rgba
+
+    source_lats = np.linspace(first_lat, last_lat, row_count, dtype=np.float32)
+    source_y = mercator_y(source_lats)
+
+    if np.allclose(source_y[0], source_y[-1]):
+        return rgba
+
+    target_y = np.linspace(source_y[0], source_y[-1], row_count, dtype=np.float32)
+    if source_y[0] <= source_y[-1]:
+        source_axis = source_y
+        source_rows = np.arange(row_count, dtype=np.float32)
+    else:
+        source_axis = source_y[::-1]
+        source_rows = np.arange(row_count - 1, -1, -1, dtype=np.float32)
+
+    row_positions = np.interp(target_y, source_axis, source_rows)
+    row_indexes = np.clip(np.rint(row_positions).astype(np.int32), 0, row_count - 1)
+    return rgba[row_indexes, :, :]
+
+
 def to_rgba(data):
     """Convert reflectivity values into an RGBA image array."""
     rgba = np.zeros((data.shape[0], data.shape[1], 4), dtype=np.uint8)
@@ -114,19 +182,23 @@ def process_grib_to_png(grib_file, png_file):
         gc.collect()
         log_memory_usage("after rgba conversion")
 
+        latitude_range = get_latitude_range(message)
+        rgba = reproject_rgba_to_mercator(rgba, latitude_range)
+        gc.collect()
+        log_memory_usage("after mercator reprojection")
+
         image = Image.fromarray(rgba, mode="RGBA")
         image.save(png_file, optimize=True)
         image.close()
 
-        first_lat = safe_grib_value(message, "latitudeOfFirstGridPointInDegrees")
-        first_lon = normalize_longitude(safe_grib_value(message, "longitudeOfFirstGridPointInDegrees"))
-        last_lat = safe_grib_value(message, "latitudeOfLastGridPointInDegrees")
-        last_lon = normalize_longitude(safe_grib_value(message, "longitudeOfLastGridPointInDegrees"))
+        corner_bounds = get_corner_bounds(message)
 
     print(f"Processed data saved as PNG to {png_file}")
-    if None not in (first_lat, first_lon, last_lat, last_lon):
-        print(f"Top Left Corner: ({first_lat}, {first_lon})")
-        print(f"Bottom Right Corner: ({last_lat}, {last_lon})")
+    if corner_bounds is not None:
+        print(f"Top Left Corner: {corner_bounds['top_left']}")
+        print(f"Top Right Corner: {corner_bounds['top_right']}")
+        print(f"Bottom Left Corner: {corner_bounds['bottom_left']}")
+        print(f"Bottom Right Corner: {corner_bounds['bottom_right']}")
 
     gc.collect()
     log_memory_usage("after saving png")
