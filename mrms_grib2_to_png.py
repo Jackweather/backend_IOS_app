@@ -48,7 +48,7 @@ def process_grib_to_png(grib_file, png_file):
     norm = BoundaryNorm(levels, ncolors=cmap.N, clip=True)
 
     # Create the Web Mercator projection for Mapbox compatibility
-    plt.figure(figsize=(15, 12), dpi=400)  # Increased figure size and DPI for higher quality
+    plt.figure(figsize=(10, 8), dpi=150)  # Reduced figure size and DPI for lower memory usage
     ax = plt.axes(projection=ccrs.Mercator())
     ax.set_extent([lons.min(), lons.max(), lats.min(), lats.max()], crs=ccrs.PlateCarree())
 
@@ -60,7 +60,7 @@ def process_grib_to_png(grib_file, png_file):
     plt.gca().patch.set_alpha(0)
 
     # Save the figure as a PNG with transparency
-    plt.savefig(png_file, dpi=600, bbox_inches='tight', pad_inches=0, transparent=True)  # High DPI and optimized bounding box
+    plt.savefig(png_file, dpi=300, bbox_inches='tight', pad_inches=0, transparent=True)  # High DPI and optimized bounding box
     plt.close()
 
     # Calculate and print the corner bounds
@@ -74,6 +74,10 @@ def process_grib_to_png(grib_file, png_file):
     print(f"Bottom Left Corner: {bottom_left}")
     print(f"Top Right Corner: {top_right}")
     print(f"Bottom Right Corner: {bottom_right}")
+
+    # Explicitly delete large variables after use
+    del data, lats, lons, grb, grbs
+    gc.collect()  # Force garbage collection
 
 if __name__ == "__main__":
     # URL of the GRIB2 file
