@@ -27,12 +27,6 @@ def process_grib_to_png(grib_file, png_file):
 
     data, lats, lons = grb.data()
 
-    # Apply a Gaussian filter to smooth the data
-    data = gaussian_filter(data, sigma=1)  # Adjust sigma for the desired level of smoothing
-
-    # Mask out values less than 1 dBZ after smoothing
-    data = np.ma.masked_less(data, 1)
-
     # Define the colormap and normalization
     colors = [
         (100/255, 200/255, 255/255),  # 5 dBZ
@@ -49,45 +43,33 @@ def process_grib_to_png(grib_file, png_file):
     norm = BoundaryNorm(levels, ncolors=cmap.N, clip=True)
 
     # Create the Web Mercator projection for Mapbox compatibility
-    plt.figure(figsize=(8, 6), dpi=100)  # Reduced figure size and DPI for lower memory usage
+    plt.figure(figsize=(6, 4), dpi=150)  # Reduced figure size and DPI for lower memory usage
     ax = plt.axes(projection=ccrs.Mercator())
     ax.set_extent([lons.min(), lons.max(), lats.min(), lats.max()], crs=ccrs.PlateCarree())
 
-    # Process GRIB2 data in smaller chunks directly
-    for grb in grbs:
-        data, lats, lons = grb.data()
-
-        # Downsample the data to reduce memory usage
-        data = data[::2, ::2]  # Take every second row and column
-        lats = lats[::2, ::2]
-        lons = lons[::2, ::2]
-
-        # Apply Gaussian filter to smooth the data
-        data = gaussian_filter(data, sigma=1)
-
-        # Mask out values less than 1 dBZ after smoothing
-        data = np.ma.masked_less(data, 1)
-
-        # Plot the data without map features or colorbar
-        plt.figure(figsize=(8, 6), dpi=100)
-        ax = plt.axes(projection=ccrs.Mercator())
-        ax.set_extent([lons.min(), lons.max(), lats.min(), lats.max()], crs=ccrs.PlateCarree())
-        ax.pcolormesh(lons, lats, data, cmap=cmap, norm=norm, transform=ccrs.PlateCarree(), antialiased=True)
-
-        # Remove the axes and set a fully transparent background
-        ax.axis('off')
-        plt.gca().patch.set_alpha(0)
-
-        # Save the figure as a PNG with transparency
-        plt.savefig(png_file, dpi=300, bbox_inches='tight', pad_inches=0, transparent=True)
-        plt.close()
-
-        # Explicitly delete variables to free memory
-        del data, lats, lons
+    # Process data in smaller chunks
+    chunk_size = 500  # Process smaller chunks to reduce memory usage
+    for i in range(0, data.shape[0], chunk_size):
+        chunk = data[i:i + chunk_size]
+        chunk = gaussian_filter(chunk, sigma=1)  # Apply Gaussian filter to the chunk
+        data[i:i + chunk_size] = chunk  # Replace the chunk in the original data
+        del chunk  # Free memory after processing each chunk
         gc.collect()
+        log_memory_usage(f"after processing chunk {i // chunk_size + 1}")
 
-        # Break after processing the first chunk for demonstration
-        break
+    # Mask out values less than 1 dBZ after processing
+    data = np.ma.masked_less(data, 1)
+
+    # Plot the data without map features or colorbar
+    mesh = ax.pcolormesh(lons, lats, data, cmap=cmap, norm=norm, transform=ccrs.PlateCarree(), antialiased=True)  # Ensure anti-aliasing
+
+    # Remove the axes and set a fully transparent background
+    ax.axis('off')
+    plt.gca().patch.set_alpha(0)
+
+    # Save the figure as a PNG with transparency
+    plt.savefig(png_file, dpi=150, bbox_inches='tight', pad_inches=0, transparent=True)  # Reduced DPI for lower memory usage
+    plt.close()
 
     # Calculate and print the corner bounds
     top_left = (lats.max(), lons.min())
