@@ -8,6 +8,7 @@ from matplotlib.colors import ListedColormap, BoundaryNorm
 from scipy.ndimage import gaussian_filter
 import gc  # Import garbage collector
 import psutil  # For monitoring memory usage
+import time  # Import time module for adding delays
 
 def download_file(url, output_path):
     """Download a file from a URL to a specified output path."""
@@ -56,6 +57,7 @@ def process_grib_to_png(grib_file, png_file):
         del chunk  # Free memory after processing each chunk
         gc.collect()
         log_memory_usage(f"after processing chunk {i // chunk_size + 1}")
+        time.sleep(5)  # Add a 1-second delay before processing the next chunk
 
     # Mask out values less than 1 dBZ after processing
     data = np.ma.masked_less(data, 1)
