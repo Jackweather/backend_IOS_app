@@ -53,26 +53,41 @@ def process_grib_to_png(grib_file, png_file):
     ax = plt.axes(projection=ccrs.Mercator())
     ax.set_extent([lons.min(), lons.max(), lats.min(), lats.max()], crs=ccrs.PlateCarree())
 
-    # Process data in smaller chunks if possible
-    chunk_size = 500  # Further reduce chunk size for large datasets
-    for i in range(0, data.shape[0], chunk_size):
-        chunk = data[i:i + chunk_size]
-        # Process the chunk (e.g., apply Gaussian filter)
-        chunk = gaussian_filter(chunk, sigma=1)
-        del chunk  # Free memory after processing each chunk
+    # Process GRIB2 data in smaller chunks directly
+    for grb in grbs:
+        data, lats, lons = grb.data()
+
+        # Downsample the data to reduce memory usage
+        data = data[::2, ::2]  # Take every second row and column
+        lats = lats[::2, ::2]
+        lons = lons[::2, ::2]
+
+        # Apply Gaussian filter to smooth the data
+        data = gaussian_filter(data, sigma=1)
+
+        # Mask out values less than 1 dBZ after smoothing
+        data = np.ma.masked_less(data, 1)
+
+        # Plot the data without map features or colorbar
+        plt.figure(figsize=(8, 6), dpi=100)
+        ax = plt.axes(projection=ccrs.Mercator())
+        ax.set_extent([lons.min(), lons.max(), lats.min(), lats.max()], crs=ccrs.PlateCarree())
+        ax.pcolormesh(lons, lats, data, cmap=cmap, norm=norm, transform=ccrs.PlateCarree(), antialiased=True)
+
+        # Remove the axes and set a fully transparent background
+        ax.axis('off')
+        plt.gca().patch.set_alpha(0)
+
+        # Save the figure as a PNG with transparency
+        plt.savefig(png_file, dpi=300, bbox_inches='tight', pad_inches=0, transparent=True)
+        plt.close()
+
+        # Explicitly delete variables to free memory
+        del data, lats, lons
         gc.collect()
-        log_memory_usage(f"after processing chunk {i // chunk_size + 1}")
 
-    # Plot the data without map features or colorbar
-    mesh = ax.pcolormesh(lons, lats, data, cmap=cmap, norm=norm, transform=ccrs.PlateCarree(), antialiased=True)  # Ensure anti-aliasing
-
-    # Remove the axes and set a fully transparent background
-    ax.axis('off')
-    plt.gca().patch.set_alpha(0)
-
-    # Save the figure as a PNG with transparency
-    plt.savefig(png_file, dpi=300, bbox_inches='tight', pad_inches=0, transparent=True)  # High DPI and optimized bounding box
-    plt.close()
+        # Break after processing the first chunk for demonstration
+        break
 
     # Calculate and print the corner bounds
     top_left = (lats.max(), lons.min())
