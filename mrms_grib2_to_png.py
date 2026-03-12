@@ -47,7 +47,7 @@ def process_grib_to_png(grib_file, png_file):
     norm = BoundaryNorm(levels, ncolors=cmap.N, clip=True)
 
     # Create the Web Mercator projection for Mapbox compatibility
-    plt.figure(figsize=(15, 12), dpi=900)  # Increased figure size and DPI for higher quality
+    plt.figure(figsize=(15, 12), dpi=400)  # Increased figure size and DPI for higher quality
     ax = plt.axes(projection=ccrs.Mercator())
     ax.set_extent([lons.min(), lons.max(), lats.min(), lats.max()], crs=ccrs.PlateCarree())
 
