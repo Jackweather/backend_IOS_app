@@ -3,25 +3,19 @@ import gzip
 import os
 import shutil
 
-import matplotlib
 import numpy as np
 import psutil
 import pygrib
 import requests
-from matplotlib import pyplot as plt
-from matplotlib.colors import BoundaryNorm, ListedColormap
-
-
-matplotlib.use("Agg")
+from PIL import Image
 
 
 DOWNLOAD_URL = "https://mrms.ncep.noaa.gov/2D/MergedBaseReflectivity/MRMS_MergedBaseReflectivity.latest.grib2.gz"
 DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 EXTRACT_CHUNK_SIZE = 1024 * 1024
-DOWNLOAD_RETRIES = int(os.getenv("MRMS_DOWNLOAD_RETRIES", "3"))
-RETRY_DELAY_SECONDS = float(os.getenv("MRMS_RETRY_DELAY_SECONDS", "2.0"))
 MIN_DBZ = 1.0
-PNG_EXPORT_SCALE = float(os.getenv("MRMS_PNG_EXPORT_SCALE", "3.0"))
+MAX_OUTPUT_DIMENSION = int(os.getenv("MRMS_MAX_OUTPUT_DIMENSION", "1400"))
+RESAMPLE_BILINEAR = getattr(Image, "Resampling", Image).BILINEAR
 
 PALETTE = np.array(
     [
@@ -37,75 +31,57 @@ PALETTE = np.array(
     dtype=np.uint8,
 )
 COLOR_BINS = np.array([5, 10, 20, 30, 40, 50, 60, 70], dtype=np.float32)
-CONTOUR_LEVELS = np.concatenate(([MIN_DBZ], COLOR_BINS)).astype(np.float32)
-CONTOUR_COLORS = [tuple(color / 255.0) for color in PALETTE]
 
 
 def download_file(url, output_path):
     """Download a file from a URL to a specified output path."""
-    temporary_path = f"{output_path}.part"
-    if os.path.exists(temporary_path):
-        os.remove(temporary_path)
-
-    try:
-        with requests.get(url, stream=True, timeout=(15, 120)) as response:
-            response.raise_for_status()
-            with open(temporary_path, "wb") as file_handle:
-                for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
-                    if chunk:
-                        file_handle.write(chunk)
-        os.replace(temporary_path, output_path)
-    finally:
-        if os.path.exists(temporary_path):
-            os.remove(temporary_path)
-
+    with requests.get(url, stream=True, timeout=(15, 120)) as response:
+        response.raise_for_status()
+        with open(output_path, "wb") as file_handle:
+            for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
+                if chunk:
+                    file_handle.write(chunk)
     print(f"File downloaded to {output_path}")
 
 
 def extract_gzip_file(gzip_path, output_path):
     """Extract a .gz file to disk without reading the full file into memory."""
-    temporary_path = f"{output_path}.part"
-    if os.path.exists(temporary_path):
-        os.remove(temporary_path)
-
-    try:
-        with gzip.open(gzip_path, "rb") as source, open(temporary_path, "wb") as destination:
-            shutil.copyfileobj(source, destination, length=EXTRACT_CHUNK_SIZE)
-        os.replace(temporary_path, output_path)
-    finally:
-        if os.path.exists(temporary_path):
-            os.remove(temporary_path)
-
+    with gzip.open(gzip_path, "rb") as source, open(output_path, "wb") as destination:
+        shutil.copyfileobj(source, destination, length=EXTRACT_CHUNK_SIZE)
     print(f"Extracted {gzip_path} to {output_path}")
 
 
-def download_and_extract_with_retries(url, gzip_path, output_path, retries):
-    """Download and extract MRMS data, retrying when the latest gzip is truncated."""
-    last_error = None
+def resize_data_smoothly(data, max_dimension):
+    """Reduce array size with bilinear interpolation to avoid blocky artifacts."""
+    if max_dimension <= 0:
+        return data
 
-    for attempt in range(1, retries + 1):
-        try:
-            download_file(url, gzip_path)
-            extract_gzip_file(gzip_path, output_path)
-            return
-        except (EOFError, gzip.BadGzipFile, OSError, requests.RequestException) as error:
-            last_error = error
-            print(f"Attempt {attempt} failed: {error}")
+    height, width = data.shape
+    max_side = max(height, width)
+    if max_side <= max_dimension:
+        return data
 
-            for path in (gzip_path, output_path, f"{gzip_path}.part", f"{output_path}.part"):
-                if os.path.exists(path):
-                    os.remove(path)
+    scale = max_dimension / float(max_side)
+    new_width = max(1, int(round(width * scale)))
+    new_height = max(1, int(round(height * scale)))
 
-            if attempt == retries:
-                break
+    print(f"Resizing data from {width}x{height} to {new_width}x{new_height}")
 
-            print(f"Retrying in {RETRY_DELAY_SECONDS:.1f} seconds...")
-            import time
-            time.sleep(RETRY_DELAY_SECONDS)
+    finite_mask = np.isfinite(data)
+    safe_data = np.where(finite_mask, data, 0.0).astype(np.float32, copy=False)
+    mask_data = finite_mask.astype(np.float32, copy=False)
 
-    raise RuntimeError(
-        f"Unable to download a complete MRMS gzip after {retries} attempts"
-    ) from last_error
+    resized_data = np.array(
+        Image.fromarray(safe_data, mode="F").resize((new_width, new_height), RESAMPLE_BILINEAR),
+        dtype=np.float32,
+    )
+    resized_mask = np.array(
+        Image.fromarray(mask_data, mode="F").resize((new_width, new_height), RESAMPLE_BILINEAR),
+        dtype=np.float32,
+    )
+
+    resized_data[resized_mask < 0.01] = np.nan
+    return resized_data
 
 
 def safe_grib_value(message, key):
@@ -155,15 +131,6 @@ def get_latitude_range(message):
     return float(first_lat), float(last_lat)
 
 
-def get_longitude_range(message):
-    """Return the first and last longitude values from GRIB metadata."""
-    first_lon = normalize_longitude(safe_grib_value(message, "longitudeOfFirstGridPointInDegrees"))
-    last_lon = normalize_longitude(safe_grib_value(message, "longitudeOfLastGridPointInDegrees"))
-    if None in (first_lon, last_lon):
-        return None
-    return float(first_lon), float(last_lon)
-
-
 def mercator_y(latitudes):
     """Convert latitude degrees to normalized Web Mercator Y coordinates."""
     clipped = np.clip(latitudes, -85.05112878, 85.05112878)
@@ -171,66 +138,65 @@ def mercator_y(latitudes):
     return np.log(np.tan((np.pi / 4.0) + (radians / 2.0)))
 
 
-def render_contourf_png(data, latitude_range, longitude_range, png_file):
-    """Render reflectivity data to a transparent PNG using contourf polygons."""
-    if latitude_range is None or longitude_range is None:
-        raise ValueError("Latitude and longitude ranges are required for contour rendering")
+def reproject_data_to_mercator(data, latitude_range):
+    """Reproject regular lat/lon gridded data into Mercator space with row interpolation."""
+    if latitude_range is None:
+        return data
 
+    first_lat, last_lat = latitude_range
+    row_count = data.shape[0]
+    if row_count <= 1:
+        return data
+
+    source_lats = np.linspace(first_lat, last_lat, row_count, dtype=np.float32)
+    source_y = mercator_y(source_lats)
+
+    if np.allclose(source_y[0], source_y[-1]):
+        return data
+
+    target_y = np.linspace(source_y[0], source_y[-1], row_count, dtype=np.float32)
+    if source_y[0] <= source_y[-1]:
+        source_axis = source_y
+        source_rows = np.arange(row_count, dtype=np.float32)
+    else:
+        source_axis = source_y[::-1]
+        source_rows = np.arange(row_count - 1, -1, -1, dtype=np.float32)
+
+    row_positions = np.interp(target_y, source_axis, source_rows)
+    lower_indexes = np.floor(row_positions).astype(np.int32)
+    upper_indexes = np.clip(lower_indexes + 1, 0, row_count - 1)
+    lower_indexes = np.clip(lower_indexes, 0, row_count - 1)
+
+    upper_weight = (row_positions - lower_indexes).astype(np.float32)[:, None]
+    lower_weight = 1.0 - upper_weight
+
+    finite_mask = np.isfinite(data)
+    safe_data = np.where(finite_mask, data, 0.0).astype(np.float32, copy=False)
+    valid_mask = finite_mask.astype(np.float32, copy=False)
+
+    lower_values = safe_data[lower_indexes, :]
+    upper_values = safe_data[upper_indexes, :]
+    lower_valid = valid_mask[lower_indexes, :]
+    upper_valid = valid_mask[upper_indexes, :]
+
+    total_weight = (lower_valid * lower_weight) + (upper_valid * upper_weight)
+    blended = (lower_values * lower_valid * lower_weight) + (upper_values * upper_valid * upper_weight)
+
+    result = np.full_like(safe_data, np.nan, dtype=np.float32)
+    np.divide(blended, total_weight, out=result, where=total_weight > 0.0)
+    return result
+
+
+def to_rgba(data):
+    """Convert reflectivity values into an RGBA image array."""
+    rgba = np.zeros((data.shape[0], data.shape[1], 4), dtype=np.uint8)
     valid_mask = np.isfinite(data) & (data >= MIN_DBZ)
     if not np.any(valid_mask):
-        height, width = data.shape
-        dpi = 100
-        export_scale = max(1.0, PNG_EXPORT_SCALE)
-        figure = plt.figure(
-            figsize=((width * export_scale) / dpi, (height * export_scale) / dpi),
-            dpi=dpi,
-            frameon=False,
-        )
-        figure.patch.set_alpha(0.0)
-        axis = figure.add_axes([0.0, 0.0, 1.0, 1.0])
-        axis.set_axis_off()
-        axis.set_facecolor((0, 0, 0, 0))
-        figure.savefig(png_file, dpi=dpi, transparent=True, bbox_inches=None, pad_inches=0)
-        plt.close(figure)
-        return
+        return rgba
 
-    row_count, column_count = data.shape
-    latitudes = np.linspace(latitude_range[0], latitude_range[1], row_count, dtype=np.float32)
-    longitudes = np.linspace(longitude_range[0], longitude_range[1], column_count, dtype=np.float32)
-    mercator_latitudes = mercator_y(latitudes)
-
-    masked_data = np.ma.masked_invalid(data)
-    masked_data = np.ma.masked_less(masked_data, MIN_DBZ)
-
-    dpi = 100
-    export_scale = max(1.0, PNG_EXPORT_SCALE)
-    figure_width = max(1.0, (column_count * export_scale) / dpi)
-    figure_height = max(1.0, (row_count * export_scale) / dpi)
-    figure = plt.figure(figsize=(figure_width, figure_height), dpi=dpi, frameon=False)
-    figure.patch.set_alpha(0.0)
-    axis = figure.add_axes([0.0, 0.0, 1.0, 1.0])
-    axis.set_axis_off()
-    axis.set_facecolor((0, 0, 0, 0))
-
-    cmap = ListedColormap(CONTOUR_COLORS)
-    norm = BoundaryNorm(CONTOUR_LEVELS, cmap.N, clip=True)
-
-    axis.contourf(
-        longitudes,
-        mercator_latitudes,
-        masked_data,
-        levels=CONTOUR_LEVELS,
-        cmap=cmap,
-        norm=norm,
-        antialiased=True,
-        extend="max",
-        corner_mask=True,
-    )
-    axis.set_xlim(float(longitudes[0]), float(longitudes[-1]))
-    axis.set_ylim(float(mercator_latitudes.min()), float(mercator_latitudes.max()))
-
-    figure.savefig(png_file, dpi=dpi, transparent=True, bbox_inches=None, pad_inches=0)
-    plt.close(figure)
+    color_indexes = np.digitize(data[valid_mask], COLOR_BINS, right=False)
+    rgba[valid_mask] = PALETTE[color_indexes]
+    return rgba
 
 
 def process_grib_to_png(grib_file, png_file):
@@ -249,11 +215,21 @@ def process_grib_to_png(grib_file, png_file):
         log_memory_usage("after float32 conversion")
 
         latitude_range = get_latitude_range(message)
-        longitude_range = get_longitude_range(message)
-        render_contourf_png(data, latitude_range, longitude_range, png_file)
+        data = resize_data_smoothly(data, MAX_OUTPUT_DIMENSION)
+        log_memory_usage("after smooth resize")
+
+        data = reproject_data_to_mercator(data, latitude_range)
+        gc.collect()
+        log_memory_usage("after mercator reprojection")
+
+        rgba = to_rgba(data)
         del data
         gc.collect()
-        log_memory_usage("after contourf render")
+        log_memory_usage("after rgba conversion")
+
+        image = Image.fromarray(rgba, mode="RGBA")
+        image.save(png_file, optimize=True)
+        image.close()
 
         corner_bounds = get_corner_bounds(message)
 
@@ -280,7 +256,8 @@ if __name__ == "__main__":
     grib_file = "MRMS_MergedBaseReflectivity.latest.grib2"
     png_file = "MRMS_MergedBaseReflectivity.png"
 
-    download_and_extract_with_retries(DOWNLOAD_URL, grib_gz_file, grib_file, DOWNLOAD_RETRIES)
+    download_file(DOWNLOAD_URL, grib_gz_file)
+    extract_gzip_file(grib_gz_file, grib_file)
     process_grib_to_png(grib_file, png_file)
 
     for temporary_file in (grib_gz_file, grib_file):
