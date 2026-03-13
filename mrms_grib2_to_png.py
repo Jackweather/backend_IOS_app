@@ -15,6 +15,7 @@ DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 EXTRACT_CHUNK_SIZE = 1024 * 1024
 MIN_DBZ = 1.0
 MAX_OUTPUT_DIMENSION = int(os.getenv("MRMS_MAX_OUTPUT_DIMENSION", "1400"))
+RESAMPLE_BILINEAR = getattr(Image, "Resampling", Image).BILINEAR
 
 PALETTE = np.array(
     [
@@ -50,18 +51,37 @@ def extract_gzip_file(gzip_path, output_path):
     print(f"Extracted {gzip_path} to {output_path}")
 
 
-def downsample_stride(data, max_dimension):
-    """Reduce array size using striding to avoid large intermediate allocations."""
+def resize_data_smoothly(data, max_dimension):
+    """Reduce array size with bilinear interpolation to avoid blocky artifacts."""
     if max_dimension <= 0:
         return data
 
-    max_side = max(data.shape)
-    step = max(1, int(np.ceil(max_side / max_dimension)))
-    if step == 1:
+    height, width = data.shape
+    max_side = max(height, width)
+    if max_side <= max_dimension:
         return data
 
-    print(f"Downsampling by factor {step} to reduce memory usage")
-    return data[::step, ::step]
+    scale = max_dimension / float(max_side)
+    new_width = max(1, int(round(width * scale)))
+    new_height = max(1, int(round(height * scale)))
+
+    print(f"Resizing data from {width}x{height} to {new_width}x{new_height}")
+
+    finite_mask = np.isfinite(data)
+    safe_data = np.where(finite_mask, data, 0.0).astype(np.float32, copy=False)
+    mask_data = finite_mask.astype(np.float32, copy=False)
+
+    resized_data = np.array(
+        Image.fromarray(safe_data, mode="F").resize((new_width, new_height), RESAMPLE_BILINEAR),
+        dtype=np.float32,
+    )
+    resized_mask = np.array(
+        Image.fromarray(mask_data, mode="F").resize((new_width, new_height), RESAMPLE_BILINEAR),
+        dtype=np.float32,
+    )
+
+    resized_data[resized_mask < 0.01] = np.nan
+    return resized_data
 
 
 def safe_grib_value(message, key):
@@ -118,21 +138,21 @@ def mercator_y(latitudes):
     return np.log(np.tan((np.pi / 4.0) + (radians / 2.0)))
 
 
-def reproject_rgba_to_mercator(rgba, latitude_range):
-    """Reproject a regular lat/lon image into a Mercator-style image by remapping rows."""
+def reproject_data_to_mercator(data, latitude_range):
+    """Reproject regular lat/lon gridded data into Mercator space with row interpolation."""
     if latitude_range is None:
-        return rgba
+        return data
 
     first_lat, last_lat = latitude_range
-    row_count = rgba.shape[0]
+    row_count = data.shape[0]
     if row_count <= 1:
-        return rgba
+        return data
 
     source_lats = np.linspace(first_lat, last_lat, row_count, dtype=np.float32)
     source_y = mercator_y(source_lats)
 
     if np.allclose(source_y[0], source_y[-1]):
-        return rgba
+        return data
 
     target_y = np.linspace(source_y[0], source_y[-1], row_count, dtype=np.float32)
     if source_y[0] <= source_y[-1]:
@@ -143,8 +163,28 @@ def reproject_rgba_to_mercator(rgba, latitude_range):
         source_rows = np.arange(row_count - 1, -1, -1, dtype=np.float32)
 
     row_positions = np.interp(target_y, source_axis, source_rows)
-    row_indexes = np.clip(np.rint(row_positions).astype(np.int32), 0, row_count - 1)
-    return rgba[row_indexes, :, :]
+    lower_indexes = np.floor(row_positions).astype(np.int32)
+    upper_indexes = np.clip(lower_indexes + 1, 0, row_count - 1)
+    lower_indexes = np.clip(lower_indexes, 0, row_count - 1)
+
+    upper_weight = (row_positions - lower_indexes).astype(np.float32)[:, None]
+    lower_weight = 1.0 - upper_weight
+
+    finite_mask = np.isfinite(data)
+    safe_data = np.where(finite_mask, data, 0.0).astype(np.float32, copy=False)
+    valid_mask = finite_mask.astype(np.float32, copy=False)
+
+    lower_values = safe_data[lower_indexes, :]
+    upper_values = safe_data[upper_indexes, :]
+    lower_valid = valid_mask[lower_indexes, :]
+    upper_valid = valid_mask[upper_indexes, :]
+
+    total_weight = (lower_valid * lower_weight) + (upper_valid * upper_weight)
+    blended = (lower_values * lower_valid * lower_weight) + (upper_values * upper_valid * upper_weight)
+
+    result = np.full_like(safe_data, np.nan, dtype=np.float32)
+    np.divide(blended, total_weight, out=result, where=total_weight > 0.0)
+    return result
 
 
 def to_rgba(data):
@@ -174,18 +214,18 @@ def process_grib_to_png(grib_file, png_file):
             data = data.astype(np.float32, copy=False)
         log_memory_usage("after float32 conversion")
 
-        data = downsample_stride(data, MAX_OUTPUT_DIMENSION)
-        log_memory_usage("after downsampling")
+        latitude_range = get_latitude_range(message)
+        data = resize_data_smoothly(data, MAX_OUTPUT_DIMENSION)
+        log_memory_usage("after smooth resize")
+
+        data = reproject_data_to_mercator(data, latitude_range)
+        gc.collect()
+        log_memory_usage("after mercator reprojection")
 
         rgba = to_rgba(data)
         del data
         gc.collect()
         log_memory_usage("after rgba conversion")
-
-        latitude_range = get_latitude_range(message)
-        rgba = reproject_rgba_to_mercator(rgba, latitude_range)
-        gc.collect()
-        log_memory_usage("after mercator reprojection")
 
         image = Image.fromarray(rgba, mode="RGBA")
         image.save(png_file, optimize=True)
